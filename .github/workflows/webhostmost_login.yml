@@ -1,0 +1,99 @@
+name: WebHostMost Auto Login
+
+on:
+  schedule:
+    # 每天的 00:30 UTC 时间执行 (北京时间 08:30)
+    - cron: '30 0 * * *'
+    # 每天的 20:25 UTC 时间执行 (北京时间第二天 04:25)
+    - cron: '25 20 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  auto-login:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Perform Login and Access URL
+        env:
+          WEBHOST_USERNAME: ${{ secrets.WEBHOST_USERNAME }}
+          WEBHOST_PASSWORD: ${{ secrets.WEBHOST_PASSWORD }}
+        run: |
+          echo "Attempting to log in to WebHostMost..."
+
+          # 发起登录请求，并将响应头和响应体分别保存
+          # -s: silent mode
+          # -D headers.txt: dump headers to file
+          # --cookie-jar cookies.txt: write cookies to file after operation
+          # --output response.json: write response body to file
+          LOGIN_RESPONSE_HTTP_CODE=$(curl -s -X POST \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
+            -H "Origin: https://server7.webhostmost.com:2222" \
+            -H "Referer: https://server7.webhostmost.com:2222/evo/login" \
+            -d "{\"username\":\"$WEBHOST_USERNAME\",\"password\":\"$WEBHOST_PASSWORD\"}" \
+            --cookie-jar cookies.txt \
+            --output response.json \
+            --write-out "%{http_code}" \
+            https://server7.webhostmost.com:2222/api/login)
+
+          echo "Login HTTP Status Code: $LOGIN_RESPONSE_HTTP_CODE"
+          echo "Login Response Body:"
+          cat response.json
+          echo "" # Newline for better readability
+
+          if [ "$LOGIN_RESPONSE_HTTP_CODE" -ne 200 ]; then
+            echo "Login failed with HTTP status code: $LOGIN_RESPONSE_HTTP_CODE"
+            exit 1
+          fi
+
+          # 检查 response.json 是否为空或无效
+          if [ ! -s response.json ]; then
+            echo "Login response body is empty or invalid."
+            exit 1
+          fi
+          
+          # 安装 jq 用于解析 JSON (GitHub Actions runner 通常自带，但显式安装更保险)
+          sudo apt-get update && sudo apt-get install -y jq
+
+          SESSION_ID=$(jq -r '.sessionID' response.json)
+          LOGIN_URL=$(jq -r '.loginURL' response.json)
+
+          if [ "$SESSION_ID" = "null" ] || [ -z "$SESSION_ID" ] || [ "$LOGIN_URL" = "null" ] || [ -z "$LOGIN_URL" ]; then
+            echo "Login failed: Could not extract sessionID or loginURL from response."
+            echo "SessionID: $SESSION_ID"
+            echo "LoginURL: $LOGIN_URL"
+            exit 1
+          else
+            echo "Login successful!"
+            echo "SessionID: $SESSION_ID"
+            echo "LoginURL: $LOGIN_URL"
+
+            echo "Attempting to access loginURL..."
+            # -L: follow redirects
+            # -b cookies.txt: use cookies from file
+            # -o /dev/null: discard output body
+            # -w "%{http_code}": write out http_code
+            ACCESS_RESPONSE_HTTP_CODE=$(curl -s -L \
+              -b cookies.txt \
+              -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
+              -H "Referer: https://server7.webhostmost.com:2222/api/login" \
+              "$LOGIN_URL" \
+              -o /dev/null \
+              -w "%{http_code}")
+            
+            echo "Access loginURL HTTP Status Code: $ACCESS_RESPONSE_HTTP_CODE"
+
+            if [[ "$ACCESS_RESPONSE_HTTP_CODE" -ge 200 && "$ACCESS_RESPONSE_HTTP_CODE" -lt 400 ]]; then
+                echo "Successfully accessed loginURL."
+            else
+                echo "Failed to access loginURL. Status code: $ACCESS_RESPONSE_HTTP_CODE"
+                # 即使访问 loginURL 失败，也可能不算作整个 Action 的失败，除非有特定要求
+                # exit 1
+            fi
+          fi
+          
+          # 清理 cookie 文件
+          rm -f response.json cookies.txt
