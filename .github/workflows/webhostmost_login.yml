@@ -23,8 +23,6 @@ jobs:
         run: |
           echo "Attempting to log in to WebHostMost..."
           
-          # 执行登录请求
-          # 确保用于续行的每个反斜杠 (\) 都是其所在行的绝对最后一个字符
           LOGIN_RESPONSE_HTTP_CODE=$(curl -s -X POST \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
@@ -41,38 +39,29 @@ jobs:
           echo "Login HTTP Status Code: $LOGIN_RESPONSE_HTTP_CODE"
           echo "Login Response Body:"
           cat response.json
-          echo "" # 换行以提高可读性
+          echo ""
 
           if [ "$LOGIN_RESPONSE_HTTP_CODE" -ne 200 ]; then
             echo "Login failed with HTTP status code: $LOGIN_RESPONSE_HTTP_CODE"
             echo "Login Headers:"
-            cat login_headers.txt # 打印头信息以帮助调试
+            cat login_headers.txt
             exit 1
           fi
 
-          # 检查 response.json 是否为空或无效
           if [ ! -s response.json ]; then
             echo "Login response body is empty or invalid."
             exit 1
           fi
           
-          # 确保 jq 可用 (通常在 GitHub runner 上已预装)
-          # 如果需要，可以取消下面这行的注释来安装 jq:
-          # sudo apt-get update && sudo apt-get install -y jq
-
-          # 从登录响应体中提取 sessionID 和 loginURL (原有逻辑)
           SESSION_ID_FROM_BODY=$(jq -r '.sessionID' response.json)
           LOGIN_URL=$(jq -r '.loginURL' response.json)
           
-          # 从登录响应头中提取 session 值 (新需求)
           SESSION_VALUE_FROM_HEADER=$(grep -i '^Set-Cookie: session=' login_headers.txt | sed -E 's/.*session=([^;]+);.*/\1/' | head -n 1)
 
           if [ -z "$SESSION_VALUE_FROM_HEADER" ]; then
             echo "Failed to extract session from login headers."
             echo "Login Headers Content:"
             cat login_headers.txt
-            # 如果后续请求严格依赖此session，考虑在此处退出
-            # exit 1 
           else
             echo "Extracted session from header for new request: $SESSION_VALUE_FROM_HEADER"
           fi
@@ -103,20 +92,17 @@ jobs:
             fi
           fi
 
-          # --- 新增的 POST 请求逻辑 ---
           echo ""
           echo "Attempting to execute Node.js Selector request..."
 
           if [ -z "$NODEJS_USER" ]; then
             echo "Error: NODEJS_USER secret is not set. Skipping Node.js Selector request."
           elif [ -z "$SESSION_VALUE_FROM_HEADER" ]; then
-            # 对于新的POST请求，我们必须使用从header中提取的session
             echo "Error: Session from header is missing for Node.js Selector request. Skipping request."
           else
             POST_DATA="command=cloudlinux-selector&method=get&params[interpreter]=nodejs&params[user]=$NODEJS_USER&csrftoken=1"
             
             echo "Executing Node.js Selector POST request..."
-            # 执行新的 POST 请求，并将响应体保存到 nodejs_selector_response.json
             curl -s -X POST \
               -H "Host: server7.webhostmost.com:2222" \
               -H "Cookie: csrftoken=1; session=$SESSION_VALUE_FROM_HEADER" \
@@ -127,18 +113,17 @@ jobs:
               https://server7.webhostmost.com:2222/CMD_PLUGINS/nodejs_selector/index.raw?c=send-request
             
             echo "Node.js Selector Request executed."
-            # 检查 nodejs_selector_response.json 是否创建成功且有内容
             if [ -s nodejs_selector_response.json ]; then
               echo "Response Body (saved to nodejs_selector_response.json):"
               cat nodejs_selector_response.json
               echo ""
 
-              # 从返回的 JSON 中提取 "domain" 字段的值
-              DOMAIN_VALUE=$(jq -r --arg user "$NODEJS_USER" 'first(.available_versions[].users[$user].applications[].domain // empty)' nodejs_selector_response.json)
+              # MODIFIED LINE BELOW
+              DOMAIN_VALUE=$(jq -r --arg target_user "$NODEJS_USER" '([.available_versions[]?.users?[$target_user]?.applications?[]?.domain?] | map(select(type=="string")) | .[0]) // ""' nodejs_selector_response.json)
 
-              if [ -n "$DOMAIN_VALUE" ] && [ "$DOMAIN_VALUE" != "null" ]; then
+              if [ -n "$DOMAIN_VALUE" ] && [ "$DOMAIN_VALUE" != "null" ]; then # Check against empty string or "null" string
                 echo "Successfully extracted domain value:"
-                echo "$DOMAIN_VALUE" # 直接打印到控制台
+                echo "$DOMAIN_VALUE"
               else
                 echo "Could not extract 'domain' value or it was null/empty from Node.js Selector response."
                 echo "Queried for user: $NODEJS_USER"
