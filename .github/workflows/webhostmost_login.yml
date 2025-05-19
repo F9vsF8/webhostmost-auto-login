@@ -1,1 +1,165 @@
+name: WebHostMost Auto Login and Plugin Request
 
+on:
+  schedule:
+    # 每天的 00:30 UTC 时间执行 (北京时间 08:30)
+    - cron: '30 0 * * *'
+    # 每天的 20:25 UTC 时间执行 (北京时间第二天 04:25)
+    - cron: '25 20 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  auto-login-and-plugin-request: # 修改了 job 名称以反映新的功能
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Perform Login, Access URL, and Plugin Request
+        env:
+          WEBHOST_USERNAME: ${{ secrets.WEBHOST_USERNAME }}
+          WEBHOST_PASSWORD: ${{ secrets.WEBHOST_PASSWORD }}
+          DA_PLUGIN_USER: ${{ secrets.DA_PLUGIN_USER }} # 新增: 从 secrets 加载 params[user] 的值
+        run: |
+          echo "Attempting to log in to WebHostMost..."
+          # 发起登录请求，并将响应头和响应体分别保存
+          # -s: silent mode
+          # --cookie-jar cookies.txt: write cookies to file after operation
+          # --output response.json: write response body to file
+          LOGIN_RESPONSE_HTTP_CODE=$(curl -s -X POST \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
+            -H "Origin: https://server7.webhostmost.com:2222" \
+            -H "Referer: https://server7.webhostmost.com:2222/evo/login" \
+            -d "{\"username\":\"$WEBHOST_USERNAME\",\"password\":\"$WEBHOST_PASSWORD\"}" \
+            --cookie-jar cookies.txt \
+            --output response.json \
+            --write-out "%{http_code}" \
+            https://server7.webhostmost.com:2222/api/login)
+
+          echo "Login HTTP Status Code: $LOGIN_RESPONSE_HTTP_CODE"
+          echo "Login Response Body:"
+          cat response.json
+          echo "" # Newline for better readability
+
+          if [ "$LOGIN_RESPONSE_HTTP_CODE" -ne 200 ]; then
+            echo "Login failed with HTTP status code: $LOGIN_RESPONSE_HTTP_CODE"
+            exit 1
+          fi
+
+          # 检查 response.json 是否为空或无效
+          if [ ! -s response.json ]; then
+            echo "Login response body is empty or invalid."
+            exit 1
+          fi
+          
+          # 安装 jq 用于解析 JSON (GitHub Actions runner 通常自带，但显式安装更保险)
+          sudo apt-get update && sudo apt-get install -y jq
+
+          SESSION_ID=$(jq -r '.sessionID' response.json)
+          LOGIN_URL=$(jq -r '.loginURL' response.json)
+
+          if [ "$SESSION_ID" = "null" ] || [ -z "$SESSION_ID" ] || [ "$LOGIN_URL" = "null" ] || [ -z "$LOGIN_URL" ]; then
+            echo "Login failed: Could not extract sessionID or loginURL from response."
+            echo "SessionID: $SESSION_ID"
+            echo "LoginURL: $LOGIN_URL"
+            rm -f response.json cookies.txt # 清理文件
+            exit 1
+          else
+            echo "Login successful!"
+            echo "SessionID: $SESSION_ID"
+            echo "LoginURL: $LOGIN_URL"
+            echo "Attempting to access loginURL..."
+            # -L: follow redirects
+            # -b cookies.txt: use cookies from file
+            # -o /dev/null: discard output body
+            # -w "%{http_code}": write out http_code
+            ACCESS_RESPONSE_HTTP_CODE=$(curl -s -L \
+              -b cookies.txt \
+              -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
+              -H "Referer: https://server7.webhostmost.com:2222/api/login" \
+              "$LOGIN_URL" \
+              -o /dev/null \
+              -w "%{http_code}")
+            
+            echo "Access loginURL HTTP Status Code: $ACCESS_RESPONSE_HTTP_CODE"
+
+            if [[ "$ACCESS_RESPONSE_HTTP_CODE" -ge 200 && "$ACCESS_RESPONSE_HTTP_CODE" -lt 400 ]]; then
+                echo "Successfully accessed loginURL."
+            else
+                echo "Failed to access loginURL. Status code: $ACCESS_RESPONSE_HTTP_CODE"
+                # 根据需要决定是否在此处退出
+                # exit 1 
+            fi
+          fi
+
+          # ---- 新增请求逻辑 ----
+          echo ""
+          echo "Attempting to send plugin request..."
+          if [ -z "$DA_PLUGIN_USER" ]; then
+            echo "Error: DA_PLUGIN_USER secret is not set."
+            rm -f response.json cookies.txt # 清理文件
+            exit 1
+          fi
+
+          # 准备 POST 请求的数据
+          # 注意：csrftoken=1 来自你的示例，如果它是动态的，你需要找到获取它的方法
+          # User-Agent, Origin, Referer 可以根据实际情况调整或从之前的请求继承
+          POST_DATA="command=cloudlinux-selector&method=get&params[interpreter]=nodejs&params[user]=$DA_PLUGIN_USER&csrftoken=1"
+
+          PLUGIN_RESPONSE_HTTP_CODE=$(curl -s -X POST \
+            -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
+            -H "Origin: https://server7.webhostmost.com:2222" \
+            -H "Referer: https://server7.webhostmost.com:2222" \
+            -H "X-Csrftoken: 1" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -b cookies.txt \
+            --data-raw "$POST_DATA" \
+            --output plugin_response.json \
+            --write-out "%{http_code}" \
+            "https://server7.webhostmost.com:2222/CMD_PLUGINS/nodejs_selector/index.raw?c=send-request")
+
+          echo "Plugin Request HTTP Status Code: $PLUGIN_RESPONSE_HTTP_CODE"
+          echo "Plugin Response Body:"
+          cat plugin_response.json
+          echo ""
+
+          if [ "$PLUGIN_RESPONSE_HTTP_CODE" -ne 200 ]; then
+            echo "Plugin request failed with HTTP status code: $PLUGIN_RESPONSE_HTTP_CODE"
+            rm -f response.json cookies.txt plugin_response.json # 清理文件
+            exit 1
+          fi
+
+          if [ ! -s plugin_response.json ]; then
+            echo "Plugin response body is empty or invalid."
+            rm -f response.json cookies.txt plugin_response.json # 清理文件
+            exit 1
+          fi
+
+          # 提取并打印 "domain" 字段的值
+          # 这个 jq 查询会查找 $DA_PLUGIN_USER 下的第一个 "domain" 值
+          # jq -r --arg user "$DA_PLUGIN_USER" '.available_versions | .. | .users? | .[$user]? | .applications? | .. | .domain? | select(type=="string" and . != "")' plugin_response.json | head -n 1
+          # 更精确的 jq 路径，基于你的示例输出结构：
+          # 我们需要遍历 available_versions -> (任意版本) -> users -> $DA_PLUGIN_USER -> applications -> (任意应用名) -> domain
+          DOMAIN_VALUE=$(jq -r --arg user "$DA_PLUGIN_USER" '
+            .available_versions |
+            map_values(.users? | .[$user]? | .applications? | map_values(.domain) // {}) | # 获取每个版本下该用户的应用的domain值
+            flatten | # 将可能的多层数组扁平化
+            map(select(. != null and . != "" and type=="string")) | # 过滤非空字符串
+            .[0] // "" # 取第一个找到的domain，如果没有则为空字符串
+          ' plugin_response.json)
+
+
+          if [ -n "$DOMAIN_VALUE" ]; then
+            echo "Extracted Domain: $DOMAIN_VALUE"
+          else
+            echo "Could not extract 'domain' field or it was empty/null for user '$DA_PLUGIN_USER'."
+            # 根据需要决定是否在此处报错退出
+          fi
+          # ---- 新增请求逻辑结束 ----
+
+          # 清理 cookie 和响应 文件
+          echo "Cleaning up temporary files..."
+          rm -f response.json cookies.txt plugin_response.json
+          echo "Script finished."
