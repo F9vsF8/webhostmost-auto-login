@@ -1,4 +1,4 @@
-name: WebHostMost Auto Login
+name: WebHostMost 自动登录
 
 on:
   schedule:
@@ -12,21 +12,19 @@ jobs:
   auto-login:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout 仓库代码
         uses: actions/checkout@v4
 
-      - name: Perform Login and Access URL
+      - name: 执行登录并访问URL
         env:
           WEBHOST_USERNAME: ${{ secrets.WEBHOST_USERNAME }}
           WEBHOST_PASSWORD: ${{ secrets.WEBHOST_PASSWORD }}
         run: |
-          echo "Attempting to log in to WebHostMost..."
-
+          echo "尝试登录 WebHostMost..."
           # 发起登录请求，并将响应头和响应体分别保存
-          # -s: silent mode
-          # -D headers.txt: dump headers to file
-          # --cookie-jar cookies.txt: write cookies to file after operation
-          # --output response.json: write response body to file
+          # -s: 静默模式
+          # --cookie-jar cookies.txt: 操作后将 cookie 写入文件
+          # --output response.json: 将响应体写入文件
           LOGIN_RESPONSE_HTTP_CODE=$(curl -s -X POST \
             -H "Accept: application/json" \
             -H "Content-Type: application/json" \
@@ -39,43 +37,51 @@ jobs:
             --write-out "%{http_code}" \
             https://server7.webhostmost.com:2222/api/login)
 
-          echo "Login HTTP Status Code: $LOGIN_RESPONSE_HTTP_CODE"
-          echo "Login Response Body:"
+          echo "登录 HTTP 状态码: $LOGIN_RESPONSE_HTTP_CODE"
+          echo "登录响应体:"
           cat response.json
-          echo "" # Newline for better readability
+          echo "" # 换行以提高可读性
 
           if [ "$LOGIN_RESPONSE_HTTP_CODE" -ne 200 ]; then
-            echo "Login failed with HTTP status code: $LOGIN_RESPONSE_HTTP_CODE"
+            echo "登录失败，HTTP 状态码: $LOGIN_RESPONSE_HTTP_CODE"
+            rm -f response.json cookies.txt # 失败时清理
             exit 1
           fi
 
           # 检查 response.json 是否为空或无效
           if [ ! -s response.json ]; then
-            echo "Login response body is empty or invalid."
+            echo "登录响应体为空或无效。"
+            rm -f response.json cookies.txt # 失败时清理
             exit 1
           fi
           
           # 安装 jq 用于解析 JSON (GitHub Actions runner 通常自带，但显式安装更保险)
-          sudo apt-get update && sudo apt-get install -y jq
+          if ! command -v jq &> /dev/null
+          then
+              echo "未找到 jq，正在安装..."
+              sudo apt-get update && sudo apt-get install -y jq
+          else
+              echo "jq 已安装。"
+          fi
 
           SESSION_ID=$(jq -r '.sessionID' response.json)
           LOGIN_URL=$(jq -r '.loginURL' response.json)
 
           if [ "$SESSION_ID" = "null" ] || [ -z "$SESSION_ID" ] || [ "$LOGIN_URL" = "null" ] || [ -z "$LOGIN_URL" ]; then
-            echo "Login failed: Could not extract sessionID or loginURL from response."
+            echo "登录失败：无法从响应中提取 sessionID 或 loginURL。"
             echo "SessionID: $SESSION_ID"
             echo "LoginURL: $LOGIN_URL"
+            rm -f response.json cookies.txt # 失败时清理
             exit 1
           else
-            echo "Login successful!"
+            echo "登录成功！"
             echo "SessionID: $SESSION_ID"
             echo "LoginURL: $LOGIN_URL"
-
-            echo "Attempting to access loginURL..."
-            # -L: follow redirects
-            # -b cookies.txt: use cookies from file
-            # -o /dev/null: discard output body
-            # -w "%{http_code}": write out http_code
+            echo "尝试访问 loginURL..."
+            # -L: 跟随重定向
+            # -b cookies.txt: 从文件使用 cookie
+            # -o /dev/null: 忽略输出体
+            # -w "%{http_code}": 输出 http_code
             ACCESS_RESPONSE_HTTP_CODE=$(curl -s -L \
               -b cookies.txt \
               -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
@@ -84,16 +90,80 @@ jobs:
               -o /dev/null \
               -w "%{http_code}")
             
-            echo "Access loginURL HTTP Status Code: $ACCESS_RESPONSE_HTTP_CODE"
-
+            echo "访问 loginURL 的 HTTP 状态码: $ACCESS_RESPONSE_HTTP_CODE"
             if [[ "$ACCESS_RESPONSE_HTTP_CODE" -ge 200 && "$ACCESS_RESPONSE_HTTP_CODE" -lt 400 ]]; then
-                echo "Successfully accessed loginURL."
+                echo "成功访问 loginURL。"
             else
-                echo "Failed to access loginURL. Status code: $ACCESS_RESPONSE_HTTP_CODE"
+                echo "访问 loginURL 失败。状态码: $ACCESS_RESPONSE_HTTP_CODE"
                 # 即使访问 loginURL 失败，也可能不算作整个 Action 的失败，除非有特定要求
-                # exit 1
+                # exit 1 # 可决定这是否应视为致命错误
             fi
           fi
+
+          echo ""
+          echo "尝试访问 Node.js selector 插件..."
+          PLUGIN_REQUEST_URL="https://server7.webhostmost.com:2222/CMD_PLUGINS/nodejs_selector/index.raw?c=send-request"
+          PLUGIN_REQUEST_DATA="command=cloudlinux-selector&method=get&params[interpreter]=nodejs&params[user]=scpkxtsp&csrftoken=1"
           
-          # 清理 cookie 文件
-          rm -f response.json cookies.txt
+          # 执行新的 POST 请求
+          # -b cookies.txt: 使用登录时获取的 session cookie
+          # --cookie "csrftoken=1": 添加/覆盖 csrftoken cookie
+          # -H "X-Csrftoken: 1": 添加 X-Csrftoken 请求头
+          PLUGIN_RESPONSE_HTTP_CODE=$(curl -s -X POST \
+            -b cookies.txt \
+            --cookie "csrftoken=1" \
+            -H "X-Csrftoken: 1" \
+            -H "User-Agent: Mozilla/5.0 (GitHub Action) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36" \
+            -H "Origin: https://server7.webhostmost.com:2222" \
+            -H "Referer: https://server7.webhostmost.com:2222/" \
+            -d "$PLUGIN_REQUEST_DATA" \
+            --output plugin_response.json \
+            --write-out "%{http_code}" \
+            "$PLUGIN_REQUEST_URL")
+
+          echo "插件请求 HTTP 状态码: $PLUGIN_RESPONSE_HTTP_CODE"
+          
+          if [ "$PLUGIN_RESPONSE_HTTP_CODE" -eq 200 ]; then
+            echo "插件请求成功。响应体:"
+            cat plugin_response.json
+            echo ""
+            
+            # 使用 jq 提取 domain 字段
+            # 该路径针对示例响应中显示的特定结构。
+            # 注意: "domains/v1.file6.dpdns.org/public_html" 包含斜杠，在 jq 路径中需要用引号括起来。
+            # 用户 "scpkxtsp" 和版本 "18.20.7" 来自您提供的示例。
+            # 如果这些值可能改变，jq 查询可能需要更具动态性。
+            TARGET_USER="scpkxtsp"
+            TARGET_APP_KEY="domains/v1.file6.dpdns.org/public_html"
+            TARGET_NODE_VERSION_IN_EXAMPLE="18.20.7" # 根据您提供的示例JSON结构
+            EXPECTED_DOMAIN_VALUE="v1.file6.dpdns.org"
+
+            EXTRACTED_DOMAIN=$(jq -r --arg user "$TARGET_USER" --arg app_key "$TARGET_APP_KEY" --arg node_version "$TARGET_NODE_VERSION_IN_EXAMPLE" \
+              '.available_versions[$node_version].users[$user].applications[$app_key].domain // empty' \
+              plugin_response.json)
+            
+            if [ -n "$EXTRACTED_DOMAIN" ]; then
+              echo "提取到的 domain 值: $EXTRACTED_DOMAIN"
+              if [ "$EXTRACTED_DOMAIN" = "$EXPECTED_DOMAIN_VALUE" ]; then
+                echo "成功: 提取到的 domain 与期望值 '$EXPECTED_DOMAIN_VALUE' 相符。"
+              else
+                echo "警告: 提取到的 domain '$EXTRACTED_DOMAIN' 与期望值 '$EXPECTED_DOMAIN_VALUE' 不符。"
+                # 可考虑这是否应视为错误: exit 1
+              fi
+            else
+              echo "错误: 无法提取 domain 字段。路径可能不正确或数据丢失。"
+              echo "尝试的 jq 路径: .available_versions.\"$TARGET_NODE_VERSION_IN_EXAMPLE\".users.\"$TARGET_USER\".applications.\"$TARGET_APP_KEY\".domain"
+              # 可决定这是否应视为致命错误: exit 1
+            fi
+          else
+            echo "插件请求失败，HTTP 状态码: $PLUGIN_RESPONSE_HTTP_CODE"
+            echo "响应体 (如有):"
+            cat plugin_response.json # 即使失败也打印响应体以供调试
+            echo ""
+            # 可决定这是否应视为致命错误: exit 1
+          fi
+          
+          # 清理 cookie 和 response 文件
+          echo "清理临时文件..."
+          rm -f response.json cookies.txt plugin_response.json
+          echo "脚本执行完毕。"
